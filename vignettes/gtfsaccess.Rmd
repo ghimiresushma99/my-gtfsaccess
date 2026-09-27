@@ -1,0 +1,353 @@
+---
+title: "Getting Started with gtfsaccess"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting Started with gtfsaccess}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(gtfsaccess)
+```
+
+# Introduction
+
+Public transport planners often want to answer a simple but important
+question: **do people have enough transit service near where they live?**
+Answering this requires combining three things that normally live in
+different files and different formats: GTFS transit schedules, a map of
+transit stops, and gridded population data.
+
+**gtfsaccess** brings these together. Give it a GTFS feed and a
+population raster, and it will locate every transit stop, draw a
+"catchment area" around each stop, count how many people live in that
+catchment, count how many departures serve that stop, and combine
+these into a single accessibility index you can summarise, classify,
+and map.
+
+Three S3 classes are used in this vignette:
+
+- **`gtfs_stops`** - stop locations read from a GTFS feed
+- **`gtfs_accessibility`** - accessibility results for each stop's catchment
+- **`gtfs_district_accessibility`** - accessibility results aggregated to district level
+
+Each supports `print()` and `plot()`; `gtfs_stops` and
+`gtfs_accessibility` also support `summary()`. All plotting including
+choosing colour classes and drawing legends is handled inside these
+methods, so the code below only ever calls the package's public
+functions.
+
+A note on the maps in this vignette: they are intentionally exploratory
+(no north arrow or scale bar), since the goal here is to compare
+relative accessibility across catchments and districts rather than to
+produce a print-ready reference map.
+
+## Typical Workflow
+
+```
+GTFS ZIP file + study area boundary
+              |
+              v
+      read_gtfs_stops()          ->  gtfs_stops object
+              |
+              v
+      create_service_areas()     ->  Voronoi catchment polygons
+              |
+              v
+      calculate_accessibility()  ->  gtfs_accessibility object
+              |
+              v
+      classify_accessibility()   ->  gtfs_accessibility object with classes (optional)
+              |
+              v
+      aggregate_accessibility()  ->  gtfs_district_accessibility object (optional)
+```
+
+Every step below shows exactly one of these functions in action, using
+small example data bundled with the package, so every chunk actually
+runs.
+
+# Step 1: Reading GTFS Stops
+
+The starting point is a GTFS ZIP file, the standard format transit
+agencies use to publish their schedules and stop locations. `gtfsaccess`
+ships a small example feed so you can follow along without downloading
+anything.
+
+```{r}
+gtfs_zip <- system.file(
+  "extdata", "example_gtfs.zip",
+  package = "gtfsaccess"
+)
+
+stops <- read_gtfs_stops(gtfs_zip)
+
+print(stops)
+
+summary(stops)
+```
+
+```{r, fig.width=5, fig.height=5}
+plot(stops)
+```
+
+`summary()` also reports the coordinate reference system: stops are
+automatically reprojected to EPSG:3035, since later steps need
+distances and areas in real-world units rather than degrees of
+latitude/longitude.
+
+## How many stops are there, and how densely spread out are they?
+
+```{r}
+boundary_file <- system.file(
+  "extdata", "example_boundary.geojson",
+  package = "gtfsaccess"
+)
+
+stop_statistics(stops, boundary_file)
+```
+
+## Defining each stop's service area
+
+Catchments are drawn as Voronoi polygons. Each stop "claims" all the
+space closer to it than to any other stop, clipped to the study area
+boundary.
+
+```{r, fig.width=5, fig.height=5}
+service_areas <- create_service_areas(
+  stops,
+  boundary_file,
+  plot = TRUE
+)
+```
+
+# Step 2: Calculating Accessibility
+
+## The formula
+
+For each catchment $i$:
+
+$$
+\text{accessibility_index}_i =
+\frac{\text{departures}_i}{\text{population_in_catchment}_i} *100
+$$
+
+Catchments with zero population are assigned `NA`, since "service per 100
+residents" is undefined when there is no one there to be served.
+
+## What the index means
+
+The index is best interpreted as **the number of scheduled departures available per 100 residents within a stop's service catchment**. It does not account for where those
+departures actually go (see *Limitations* below). The measure is more precisely 
+a per-capita transit supply indicator. Throughout every map
+in this vignette, **darker/more intense colour always means a higher
+index**.
+
+- **Low accessibility** → few departures relative to the surrounding
+  population, that means many residents sharing the available transit service, infrequent service, or both.
+- **High accessibility** → many departures relative to the nearby
+  population that means frequent service, a sparse catchment, or both.
+
+Because a single index value is compatible with more than one
+underlying cause, `population_in_catchment` and `departures` are kept
+in the output so either factor can be checked directly.
+
+## Computing and viewing it
+
+```{r}
+population_file <- system.file(
+  "extdata", "example_population.tif",
+  package = "gtfsaccess"
+)
+
+population <- terra::rast(population_file)
+
+accessibility <- calculate_accessibility(
+  service_areas,
+  population,
+  gtfs_zip
+)
+
+print(accessibility)
+
+summary(accessibility)
+```
+
+The mean is substantially larger than the median and a small number of catchments have exceptionally high accessibility values, indicating a strongly right-skewed distribution.
+
+The raw index, plotted directly:
+
+```{r, fig.width=5, fig.height=5}
+plot(accessibility)
+```
+
+`plot()` classes catchments into quantile bins rather than equal-width
+ones, since accessibility indices are typically right-skewed (a small
+number of catchments are often around a single dominant hub have very
+high values). Quantile classing spreads catchments evenly across
+colour bins regardless of that skew.
+
+## Turning numbers into categories
+
+`classify_accessibility()` sorts catchments into named, ordered
+categories using Jenks natural breaks by default:
+
+```{r}
+accessibility <- classify_accessibility(accessibility)
+
+table(accessibility$accessibility$accessibility_class)
+```
+
+Plotting the same object with `classified = TRUE` now uses those
+stored classes:
+
+```{r, fig.width=5, fig.height=5}
+plot(accessibility, classified = TRUE)
+```
+
+**Why is almost everything "Very Low"?** This reflects the underlying
+data, not a plotting artefact: accessibility here is concentrated
+around one or two major hub stops with disproportionately high
+departures-per-100-resident values, while the rest of the network sits far
+below them  in this example data, likely driven by a small number of
+catchments with small population but non-trivial service (a
+known sensitivity of the raw formula; see *Limitations*).
+
+Plotted directly, these extreme values dominate the classification and reduce the visual contrast among the remaining catchments.
+
+
+```{r}
+accessibility_log <- accessibility
+
+accessibility_log$accessibility$accessibility_index <-
+  log1p(accessibility_log$accessibility$accessibility_index)
+
+accessibility_log <- classify_accessibility(accessibility_log)
+table(accessibility_log$accessibility$accessibility_class)
+```
+
+To improve visualization, we apply a logarithmic transformation to the accessibility index before classification. The transformation compresses the largest values while preserving the ordering of catchments, producing a more balanced classification without changing the underlying accessibility measure computed by `calculate_accessibility()`.
+
+```{r, fig.width=5, fig.height=5}
+plot(accessibility_log, classified = TRUE)
+```
+
+
+Other classification schemes are available too, for example, tertiles
+via quantiles, which guarantee roughly equal numbers of catchments per
+class:
+
+```{r}
+accessibility_quantile <- classify_accessibility(
+  accessibility,
+  n_classes = 4,
+  method = "quantile"
+)
+
+table(accessibility_quantile$accessibility$accessibility_class)
+```
+
+```{r, fig.width=5, fig.height=5}
+plot(accessibility_quantile, classified = TRUE)
+```
+
+Using quantiles forces approximately the same number of catchments into each class. Unlike Jenks natural breaks, which highlights natural groupings in the data, quantiles emphasize relative ranking. The resulting map spreads colours more evenly across the study area, making spatial patterns easier to compare, although class boundaries may no longer correspond to meaningful gaps in the accessibility values.
+
+## Extracting summary statistics directly
+
+```{r}
+accessibility_statistics(accessibility)
+```
+
+# Step 3: Aggregating to Districts
+
+`aggregate_accessibility()` rolls catchment-level results up to
+district polygons, returning a `gtfs_district_accessibility` object
+that supports the same `print()`/`plot()` pattern as above:
+
+```{r}
+districts_file <- system.file(
+  "extdata", "example_districts.geojson",
+  package = "gtfsaccess"
+)
+
+district_accessibility <- aggregate_accessibility(
+  accessibility,
+  districts_file
+)
+
+print(district_accessibility)
+```
+
+The raw, quantile-classed view:
+
+```{r, fig.width=5, fig.height=5}
+plot(district_accessibility)
+```
+
+The full underlying table including `total_population` and
+`total_departures` per district is available via
+`district_accessibility$accessibility`:
+
+```{r}
+district_accessibility$accessibility
+```
+
+# Summary of Methods Demonstrated
+
+| Class                          | Standard methods            | Package-specific methods                        |
+|----------------------------------|------------------------------|---------------------------------------------------|
+| `gtfs_stops`                    | `print()`, `summary()`, `plot()` | `stop_statistics()`, `create_service_areas()`     |
+| `gtfs_accessibility`            | `print()`, `summary()`, `plot()`, `plot(classified = TRUE)` | `accessibility_statistics()`, `aggregate_accessibility()`, `classify_accessibility()` |
+| `gtfs_district_accessibility`   | `print()`, `plot()`, `plot(classified = TRUE)` | - |
+
+# Limitations and Future Extensions
+
+The accessibility index used here - departures per 100 residents within a
+Voronoi catchment is a deliberately simple proxy for transit supply.
+It does not account for *where* those departures go (destination
+accessibility), time-of-day service variation, or the fact that walk
+catchments in reality don't have hard Voronoi edges. It is also
+sensitive to catchments with very small populations, where dividing by
+a small denominator can produce disproportionately large index values exactly the kind of skew visible in the maps above. Future extensions
+could incorporate destination-weighted accessibility, headway
+regularity, distance-decayed catchments, or a floor on catchment
+population before computing the index.
+
+
+# LLM Usage
+
+## LLM tool used:
+Claude Sonnet 4.6 (via claude.ai) and ChatGPT-5 (via chatgpt.com).
+
+## Purpose:
+The LLMs were used throughout package development as programming, debugging, and writing assistants. Their contributions included:
+
+- Debugging implementation issues, including Voronoi service area generation and stop matching.
+- Assisting with the implementation and refinement of helper functions.
+- Suggesting improvements to plotting methods, including colour schemes, legends, labels, titles, and map layout.
+- Drafting and refining function documentation, examples, and help pages.
+- Assisting with vignette writing and restructuring.
+- Suggesting edge cases, validation checks, and code improvements.
+- Explaining R package development practices and assisting with debugging `devtools::check()` issues.
+
+## Percentage of code generated by LLM:
+
+The estimated level of LLM assistance for the main source files is shown below.
+
+| File | Estimated LLM contribution |                 Notes                    |
+|------|:---------------------------:|------------------------------------------|
+| `classes.R` | 20-30% | S3 class definitions and object structure were designed and implemented by the author. LLM assistance was limited to examples and code review. |
+| `gtfs_stops.R` | 20-30% | Core implementation by the author. LLM assisted with documentation, examples, debugging to match each Voronoi cell to its generating stop by containment and edge cases. |
+| `gtfs_accessibility.R` | 30-40% | Accessibility computation and overall implementation were primarily developed by the author. LLM assisted with departure counting, aggregation, documentation, examples, and debugging. |
+| `methods.R` | 60-70% | Extensive LLM assistance with plotting methods, legends, colour scales, labels, titles, layout, and visualization improvements. |
+| Documentation (`.Rd`) | 70-80% | LLM extensively assisted in drafting and refining help pages, parameter descriptions, examples, and return values. |
+| Vignette | 60-70% | Workflow of the document and methodology for analysis were developed by the author. LLM assisted with writing, restructuring, examples, and revisions. |

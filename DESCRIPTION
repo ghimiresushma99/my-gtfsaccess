@@ -1,0 +1,26 @@
+Package: gtfsaccess
+Title: Simple Tools for Public Transport Accessibility Analysis Using GTFS
+Version: 0.0.0.9000
+Authors@R:
+    person("Sushma", "Ghimire", email = "ghimiresushma99@gmail.com",
+           role = c("aut", "cre"))
+Description: gtfsaccess provides tools for deriving transit accessibility 
+            from GTFS data by generating stop service areas, integrating gridded population data, 
+            computing accessibility indices, and summarizing accessibility across administrative districts.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports:
+    dplyr,
+    rlang,
+    sf,
+    terra,
+    tidytransit,
+    classInt,
+    graphics
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 8.0.0
+Suggests: 
+    knitr,
+    quarto,
+    rmarkdown
+VignetteBuilder: knitr, quarto
